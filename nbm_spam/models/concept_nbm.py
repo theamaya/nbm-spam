@@ -113,7 +113,7 @@ class ConceptNBMNary(nn.Module):
             bases_dropout (0.0): Coefficient for dropping out entire basis.
             batchnorm (True): Whether to use batchnorm or not.
             polynomial (None): Supply SPAM initialization here to train NBM-SPAM.
-                Note: if polynomial is not None, nary has to be of order 1.
+                Note: if polynomial is not None, nary has to be of order 1. ###why?
         """
         super(ConceptNBMNary, self).__init__()
 
@@ -141,8 +141,8 @@ class ConceptNBMNary(nn.Module):
             raise TypeError("'nary': None or list or dict supported")
 
         self.bases_nary_models = nn.ModuleDict()
-        for order in self._nary_indices.keys():
-            for subnet in range(self._num_subnets):
+        for order in self._nary_indices.keys(): #just 1 for unary model
+            for subnet in range(self._num_subnets): #this is generally set to 1
                 self.bases_nary_models[
                     self.get_key(order, subnet)
                 ] = ConceptNNBasesNary(
@@ -151,15 +151,16 @@ class ConceptNBMNary(nn.Module):
                     hidden_dims=hidden_dims,
                     dropout=dropout,
                     batchnorm=batchnorm,
-                )
+                ) #the set of different neural networks to be trained ; if we want unary and pairwise interations, we need two nn s
 
         self.bases_dropout = nn.Dropout(p=bases_dropout)
 
-        num_out_features = (
+        num_out_features = (     
             sum(len(self._nary_indices[order]) for order in self._nary_indices.keys())
             * self._num_subnets
-        )
-        self.featurizer = nn.Conv1d(
+        )  # the total number of each feature interactions (including all orders)
+
+        self.featurizer = nn.Conv1d(  ### using the bases to calculate final features
             in_channels=num_out_features * self._num_bases,
             out_channels=num_out_features,
             kernel_size=1,
@@ -205,7 +206,7 @@ class ConceptNBMNary(nn.Module):
                 )
         else:
             self._use_spam = False
-            self.classifier = nn.Linear(
+            self.classifier = nn.Linear(  ### the last layer to get class predictions
                 in_features=num_out_features,
                 out_features=self._num_classes,
                 bias=True,

@@ -1,0 +1,5 @@
+[2022-08-15 19:40:33,376][__main__][INFO] - Training interpretable models on tabular datasets
+[2022-08-15 19:40:34,386][torch.distributed.nn.jit.instantiator][INFO] - Created a temporary directory at /tmp/tmp4b1dv4a9
+[2022-08-15 19:40:34,387][torch.distributed.nn.jit.instantiator][INFO] - Writing /tmp/tmp4b1dv4a9/_remote_module_non_scriptable.py
+[2022-08-15 19:40:34,832][torch.distributed.distributed_c10d][INFO] - Added key: store_based_barrier_key:1 to store for rank: 0
+[2022-08-15 19:40:34,832][torch.distributed.distributed_c10d][INFO] - Rank 0: Completed store-based barrier for key:store_based_barrier_key:1 with 1 nodes.
