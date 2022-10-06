@@ -24,7 +24,15 @@ from omegaconf import DictConfig, open_dict
 from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.utilities.types import EPOCH_OUTPUT
 from torch import Tensor
+from torch.utils.data import DataLoader
 
+from opacus.validators import ModuleValidator
+from opacus import PrivacyEngine
+
+from opacus.data_loader import DPDataLoader
+from opacus.lightning import DPLightningDataModule
+
+from pytorch_lightning.utilities.cli import LightningCLI
 
 MODEL_MAP = {
     "linear": ("ConceptLinear", False),
@@ -35,23 +43,30 @@ MODEL_MAP = {
     "spam": ("ConceptSPAM", True),
 }
 
+MAX_GRAD_NORM = 1.2
+EPSILON = 50.0
+DELTA = 1e-5
+
 
 class TabularPredictionModule(pl.LightningModule):
     def __init__(
-        self,
-        num_concepts,
-        num_classes,
-        learning_rate,
-        momentum,
-        weight_decay,
-        criterion,
-        optimizer,
-        model,
-        model_params=None,
-        trainer=None,
-        datamodule=None,
-        warmup=None,
-        ckpt_dir=None,
+            self,
+            num_concepts,
+            num_classes,
+            learning_rate,
+            momentum,
+            weight_decay,
+            criterion,
+            optimizer,
+            model,
+            model_params=None,
+            trainer=None,
+            datamodule=None,
+            warmup=None,
+            ckpt_dir=None,
+            delta: float = 1e-5,
+            noise_multiplier: float = 1.0,
+            max_grad_norm: float = 1.0,
     ):
         super(TabularPredictionModule, self).__init__()
         self.MODEL_ATTR = "model"
@@ -82,6 +97,13 @@ class TabularPredictionModule(pl.LightningModule):
         print(self.model)
         self._epoch_time = time.time()
 
+        self.enable_dp= True
+        if self.enable_dp:
+            self.privacy_engine = PrivacyEngine()
+        self.delta = delta
+        self.noise_multiplier = noise_multiplier
+        self.max_grad_norm = max_grad_norm
+
     def _init_criterion(self) -> None:
         self._binary_classification = False
         self._regression = False
@@ -95,19 +117,19 @@ class TabularPredictionModule(pl.LightningModule):
         if self.hparams.criterion == "BCEWithLogitsLoss":
             print("`BCEWithLogitsLoss` criterion, learning logistic regression")
             assert (
-                self.hparams.num_classes == 2
+                    self.hparams.num_classes == 2
             ), "`num_classes` must be 2 for binary classification"
             self._binary_classification = True
         elif self.hparams.criterion == "MSELoss":
             print("`MSELoss` criterion, learning least-squares regression")
             assert (
-                self.hparams.num_classes == 1
+                    self.hparams.num_classes == 1
             ), "`num_classes` must be 1 for regression"
             self._regression = True
         else:
             print("`CrossEntropyLoss` criterion, learning multi-class classification")
             assert (
-                self.hparams.num_classes > 2
+                    self.hparams.num_classes > 2
             ), "`num_classes` must be greater than 2 for multi-class"
         self.criterion = getattr(nn, self.hparams.criterion)()
 
@@ -186,10 +208,10 @@ class TabularPredictionModule(pl.LightningModule):
         return super(TabularPredictionModule, self).training_epoch_end(outputs)
 
     def _get_outputs_and_losses(
-        self,
-        inputs: Tensor,
-        targets: Tensor,
-        key: str = "train",
+            self,
+            inputs: Tensor,
+            targets: Tensor,
+            key: str = "train",
     ) -> Tuple[Tensor, Tensor]:
 
         _model = self.rgetattr(self, self.MODEL_ATTR)
@@ -239,7 +261,7 @@ class TabularPredictionModule(pl.LightningModule):
         return loss, outputs
 
     def _log_progress_bar_metrics(
-        self, outputs: Tensor, labels: Tensor, loss: Tensor, key: str = "train"
+            self, outputs: Tensor, labels: Tensor, loss: Tensor, key: str = "train"
     ) -> None:
         _outputs, _loss = outputs.detach(), loss.detach()
         _loss_handle = getattr(self, f"_loggingname_{key}_loss")
@@ -277,7 +299,7 @@ class TabularPredictionModule(pl.LightningModule):
             self.log(_m2_handle, self.test_m2, on_epoch=True, prog_bar=True)
 
     def _log_additional_metrics(
-        self, metric_names: List[str], metric_values: List[Tensor]
+            self, metric_names: List[str], metric_values: List[Tensor]
     ) -> None:
         for _metric, _value in zip(metric_names, metric_values):
             lname = getattr(self, f"_loggingname_train_{_metric}_loss")
@@ -291,7 +313,7 @@ class TabularPredictionModule(pl.LightningModule):
             )
 
     def training_step(
-        self, batch: Tensor, batch_idx: int, key: str = "train"
+            self, batch: Tensor, batch_idx: int, key: str = "train"
     ) -> Tensor:
         inputs, targets = batch[0], batch[1]
         self.model.train()
@@ -316,6 +338,7 @@ class TabularPredictionModule(pl.LightningModule):
 
     def configure_optimizers(self) -> None:
         _model = self.rgetattr(self, self.MODEL_ATTR)
+
         if self.hparams.optimizer == "SGD":
             optimizer = torch.optim.SGD(
                 _model.parameters(),
@@ -338,14 +361,38 @@ class TabularPredictionModule(pl.LightningModule):
         else:
             raise ValueError(f"Invalid optimizer '{self.hparams.optimizer}'")
 
+        #######################################
+
+        if self.enable_dp:
+            data_loader = (
+                # soon there will be a fancy way to access train dataloader,
+                # see https://github.com/PyTorchLightning/pytorch-lightning/issues/10430
+                self.trainer._data_connector._train_dataloader_source.dataloader()
+            )
+
+            # transform (model, optimizer, dataloader) to DP-versions
+            if hasattr(self, "dp"):
+                self.dp["model"].remove_hooks()
+            dp_model, optimizer, dataloader = self.privacy_engine.make_private(
+                module=self,
+                optimizer=optimizer,
+                data_loader=data_loader,
+                noise_multiplier=self.noise_multiplier,
+                max_grad_norm=self.max_grad_norm,
+                poisson_sampling=isinstance(data_loader, DPDataLoader),
+            )
+            self.dp = {"model": dp_model}
+
+        #######################################
+
         total_steps = self.hparams.datamodule.train_dataset_size
         total_batch_size = (
-            self.hparams.datamodule.batch_size
-            * self.hparams.trainer.gpus
-            * self.hparams.trainer.num_nodes
+                self.hparams.datamodule.batch_size
+                * self.hparams.trainer.gpus
+                * self.hparams.trainer.num_nodes
         )
         max_steps = (
-            ceil(total_steps / total_batch_size) * self.hparams.trainer.max_epochs
+                ceil(total_steps / total_batch_size) * self.hparams.trainer.max_epochs
         )
 
         if self.hparams.warmup is None:
@@ -382,7 +429,6 @@ class TabularPredictionModule(pl.LightningModule):
 
 @hydra.main(config_path="config")
 def main(config: DictConfig) -> None:
-
     logger = logging.getLogger(__name__)
     logger.info("Training interpretable models on tabular datasets")
 
@@ -399,6 +445,11 @@ def main(config: DictConfig) -> None:
         batch_size=config.datamodule.batch_size,
     )
 
+    dp_data = DPLightningDataModule(datamodule)
+
+    # train_loader= DataLoader(train_dataset, batch_size=config.datamodule.batch_size)
+    # val_loader = DataLoader(val_dataset, batch_size=config.datamodule.batch_size)
+    # test_loader = DataLoader(test_dataset, batch_size=config.datamodule.batch_size)
     # adding data parameters to config
 
     with open_dict(config.tabular_prediction_module):
@@ -414,8 +465,25 @@ def main(config: DictConfig) -> None:
         config.tabular_prediction_module.ckpt_dir = os.getcwd()
 
     model = instantiate(config.tabular_prediction_module)
-    f_trainer.fit(model=model, datamodule=datamodule)
-    f_trainer.test(model=model, datamodule=datamodule)
+
+    model.model = ModuleValidator.fix(model.model)
+    # privacy_engine = PrivacyEngine()
+    # dpmodel, dpoptimizer, dptrain_loader = privacy_engine.make_private_with_epsilon(
+    #     module=model,
+    #     optimizer=(model.configure_optimizers()['optimizer']),
+    #     data_loader=train_loader,
+    #     epochs=config.datamodule.max_epochs,
+    #     target_epsilon=EPSILON,
+    #     target_delta=DELTA,
+    #     max_grad_norm=MAX_GRAD_NORM,
+    # )
+    # model.model= dpmodel
+    # model.configure_optimizers(dpoptimizer)
+
+    # f_trainer.fit(model=model.model, train_dataloaders=train_loader)
+    f_trainer.fit(model=model, datamodule=dp_data)
+    # f_trainer.test(model=model, dataloaders=test_loader)
+    f_trainer.test(model=model, datamodule=dp_data)
 
 
 if __name__ == "__main__":

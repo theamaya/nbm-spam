@@ -1,0 +1,36 @@
+datamodule:
+  dataset:
+    dataset_name: CaliforniaHousing
+    scale_range: [0, 1]
+  batch_size: 1024
+  max_epochs: 1000
+  timeout_min: 1440
+
+
+tabular_prediction_module:
+  _target_: train_tabular.TabularPredictionModule
+  num_concepts: 8
+  num_classes: 1
+  learning_rate: 0.001956
+  weight_decay: 1.568e-05
+  criterion: MSELoss
+  optimizer: AdamW
+  momentum: 0.9
+  model: nbm
+  model_params: 
+    nary: null
+    num_bases: 100
+    hidden_dims: [256,128,128]
+    num_subnets: 1
+    dropout: 0.0
+    bases_dropout: 0.05
+    batchnorm: True
+    output_penalty: 0.0001439
+
+# @package _global_
+trainer:
+  gpus: 1
+  num_nodes: 1
+  max_epochs: ${datamodule.max_epochs}
+  log_every_n_steps: 1
+  strategy: ddp
